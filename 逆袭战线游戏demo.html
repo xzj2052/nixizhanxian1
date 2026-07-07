@@ -1,0 +1,651 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<title>逆袭战线 - 三消游戏Demo</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+html,body{width:100%;height:100%;overflow:hidden;background:#0a0a1a}
+body{display:flex;justify-content:center;align-items:center;font-family:'Microsoft YaHei','PingFang SC',sans-serif;user-select:none;-webkit-user-select:none;-webkit-tap-highlight-color:transparent}
+.game-wrapper{position:relative;overflow:hidden;background:linear-gradient(135deg,#0d1025 0%,#1a1040 50%,#0d1025 100%);border-radius:16px;box-shadow:0 0 80px rgba(80,60,200,.3),inset 0 0 60px rgba(0,0,0,.4);padding:8px;max-width:calc(100vw - 4px);max-height:calc(100vh - 4px)}
+canvas{display:block;border-radius:10px;cursor:pointer;max-width:100%;max-height:100%;aspect-ratio:900/540;touch-action:manipulation;-webkit-touch-callout:none}
+#force-panel{display:none;position:fixed;inset:0;z-index:1999;background:radial-gradient(ellipse at center,#1a1040 0%,#0a0a1a 100%);flex-direction:column;justify-content:center;align-items:center;gap:20px;text-align:center}
+#force-panel h2{color:#FFD700;font-size:20px;letter-spacing:2px}
+#force-panel p{color:#AAA;font-size:14px;max-width:280px;line-height:1.6}
+#force-panel .btn{display:inline-block;padding:12px 32px;font-size:16px;font-weight:bold;color:#1a0a2e;background:linear-gradient(135deg,#FFD700,#FF8C00);border:none;border-radius:30px;cursor:pointer;box-shadow:0 0 24px rgba(255,215,0,.4)}
+#force-panel .btn:active{transform:scale(.95)}
+</style>
+</head>
+<body>
+<div id="force-panel">
+  <h2>请旋转手机</h2>
+  <p>本游戏为横屏设计<br>将手机横放即可开始游玩</p>
+  <button class="btn" id="btn-force-landscape">继续竖屏游玩</button>
+  <p style="font-size:12px;color:#888">竖屏体验会打折扣</p>
+</div>
+<div class="game-wrapper"><canvas id="gameCanvas"></canvas></div>
+<script>
+(function(){
+const CANVAS_W=900,CANVAS_H=540;
+const ROWS=8,COLS=8,CELL=48,GAP=3;
+const BOARD_W=COLS*(CELL+GAP)-GAP;
+const BOARD_H=BOARD_W;
+const BOARD_X=Math.floor((CANVAS_W-BOARD_W)/2);
+const BOARD_Y=133;
+const TYPES=6;
+const TYPE_BOMB=6,TYPE_RAINBOW=7,TYPE_SHADOW=8;
+const LINE_MAX=8,MIDPOINT=4;
+const ENERGY_MAX=100;
+const PRESSURE_MAX=100;
+const BLOCK_COLORS=['#FF6B6B','#4ECDC4','#FFD93D','#A78BFA','#FB923C','#60A5FA'];
+const BLOCK_LIGHT=['#FF9E9E','#7EDDD6','#FFE88A','#C4B5FD','#FDB77D','#93C5FD'];
+const BLOCK_DARK=['#C0392B','#1ABC9C','#F39C12','#8E44AD','#D35400','#2980B9'];
+const BLOCK_EMOJI=['⚔️','🛡️','🏇','🏹','🔫','🪓'];
+const UNIT_NAMES=['剑兵','盾兵','骑兵','弓兵','火枪','战斧'];
+const CAMP_X=22,CAMP_Y=20,CAMP_W=90,CAMP_H=110;
+const CRYSTAL_X=CANVAS_W-112,CRYSTAL_Y=20,CRYSTAL_W=90,CRYSTAL_H=110;
+const TRACK_X=CAMP_X+CAMP_W+14,TRACK_W=CRYSTAL_X-TRACK_X-14,TRACK_Y=65,TRACK_H=22;
+
+const canvas=document.getElementById('gameCanvas');
+canvas.width=CANVAS_W;canvas.height=CANVAS_H;
+const ctx=canvas.getContext('2d');
+
+// ===== 阶段 =====
+var phase='start'; // start|playing|select|tutorial
+var tutorialStep=0;
+var highLevel=parseInt(localStorage.getItem('nz_level')||'1');
+function saveHigh(){localStorage.setItem('nz_level',highLevel);}
+
+// ===== 游戏状态 =====
+var board=[],selectedRow=-1,selectedCol=-1;
+var particles=[],floatingTexts=[],lineParticles=[];
+var comboCount=0,totalMoves=0,score=0,level=1;
+var battleLinePos=1,energy=0,enemyPressure=0,pressureAccum=0;
+var consecutiveAdvances=0,nixiActive=false,nixiTimer=0;
+var gameState=0; // 0=idle,1=selected,2=animating,3=over
+var shakeAmount=0,animTime=0;
+var lastSwapHadSpecial=false,lastLineParticleSpawn=0;
+var isWin=false;
+var pressureRate=4; // 随关卡变化的压力增速
+var stormTimer=0; // 暗影风暴计时器
+var startBtn=null,tutoNextBtn=null,selectBtns=[];
+
+// ===== 10关战役配置 =====
+var LEVEL_CONFIG=[
+  {name:'新兵试练',desc:'光明堡新兵初上战场',pressure:2.5,startLine:2,shadow:0,shadowHP:2},          // 1
+  {name:'山谷伏击',desc:'黑石谷遭遇伏兵',pressure:3.5,startLine:2,shadow:2,shadowHP:2},              // 2
+  {name:'渡河之战',desc:'冥水河畔远程对射',pressure:4,startLine:2,shadow:1,shadowHP:2,disable:4},    // 3: 禁用火枪(红色)
+  {name:'暴风前夜',desc:'敌军主力即将集结',pressure:5,startLine:1,shadow:4,shadowHP:2},              // 4
+  {name:'深渊先锋',desc:'深渊骑士团出动',pressure:5.5,startLine:2,shadow:4,shadowHP:3},              // 5: 魔兵HP=3
+  {name:'暗影风暴',desc:'暗渊塔释放风暴',pressure:6,startLine:1,shadow:4,shadowHP:2,storm:15},       // 6: 15秒风暴
+  {name:'两面夹击',desc:'敌军绕后偷袭',pressure:3.5,startLine:3,shadow:2,shadowHP:2,boostRainbow:true},// 7: 彩虹增多
+  {name:'骑士团长',desc:'白银团长领军冲锋',pressure:7,startLine:3,shadow:0,shadowHP:2,extraCharge:2}, // 8: 冲锋+2格
+  {name:'暗渊要塞',desc:'攻至塔下近卫死守',pressure:8,startLine:1,shadow:6,shadowHP:4},             // 9
+  {name:'攻破暗渊',desc:'最终决战！全军出击！',pressure:7,startLine:2,shadow:4,shadowHP:3,boss:true} // 10: BOSS标记
+];
+
+function rng(mn,mx){return Math.floor(Math.random()*(mx-mn+1))+mn}
+function dist(r1,c1,r2,c2){return Math.abs(r1-r2)+Math.abs(c1-c2)}
+function drawRoundRect(x,y,w,h,r,fill,stroke){
+  ctx.beginPath();ctx.roundRect(x,y,w,h,r);
+  if(fill){ctx.fillStyle=fill;ctx.fill();}
+  if(stroke){ctx.strokeStyle=stroke;ctx.lineWidth=2;ctx.stroke();}
+}
+function btnRect(x,y,w,h,text,color){
+  drawRoundRect(x,y,w,h,14,color);
+  ctx.fillStyle='#fff';ctx.font='bold 15px "Microsoft YaHei"';ctx.textAlign='center';ctx.textBaseline='middle';
+  ctx.fillText(text,x+w/2,y+h/2+1);
+  return {x:x,y:y,w:w,h:h};
+}
+function isInBtn(b,mx,my){return b&&mx>=b.x&&mx<=b.x+b.w&&my>=b.y&&my<=b.y+b.h;}
+
+// ===== 开始画面 =====
+function drawStartScreen(){
+  ctx.fillStyle='rgba(0,0,0,0.82)';ctx.fillRect(0,0,CANVAS_W,CANVAS_H);
+  var cx=CANVAS_W/2,cy=CANVAS_H/2-40;
+  ctx.fillStyle='#FFD700';ctx.font='bold 42px "Microsoft YaHei"';ctx.textAlign='center';
+  ctx.fillText('⚔ 逆袭战线 ⚔',cx,cy-55);
+  ctx.font='15px "Microsoft YaHei"';ctx.fillText('光明堡 vs 暗渊塔 · 消除类战役',cx,cy-15);
+  ctx.fillStyle='#AAA';ctx.font='12px "Microsoft YaHei"';
+  ctx.fillText('集结部队  |  冲锋陷阵  |  逆袭翻盘',cx,cy+12);
+
+  startBtn=btnRect(cx-90,cy+38,180,40,'▶  开始游戏','#FFD700');
+  btnRect(cx-90,cy+90,180,40,'🎓  新手引导','rgba(255,255,255,0.15)');
+  btnRect(cx-90,cy+142,180,40,'📋  选择关卡','rgba(255,255,255,0.12)');
+  ctx.fillStyle='#666';ctx.font='11px "Microsoft YaHei"';
+  ctx.fillText('点击相邻兵种交换  |  3个同兵种出击  |  4连得🪨投石车  |  5连得🧙法师',cx,cy+210);
+}
+
+// ===== 新手引导 =====
+function drawTutorial(){
+  ctx.fillStyle='rgba(0,0,0,0.82)';ctx.fillRect(0,0,CANVAS_W,CANVAS_H);
+  var cx=CANVAS_W/2,cy=CANVAS_H/2-20;
+  if(tutorialStep===0){
+    ctx.fillStyle='#FFD700';ctx.font='bold 22px "Microsoft YaHei"';ctx.textAlign='center';
+    ctx.fillText('🎯 第一步：调兵遣将',cx,cy-60);
+    ctx.fillStyle='#FFF';ctx.font='14px "Microsoft YaHei"';
+    ctx.fillText('点击一个兵种选中它',cx,cy-15);
+    ctx.fillText('再点击它相邻的兵种交换位置',cx,cy+15);
+    var x1=BOARD_X+3*(CELL+GAP),y1=BOARD_Y+3*(CELL+GAP);
+    var x2=BOARD_X+4*(CELL+GAP),y2=BOARD_Y+3*(CELL+GAP);
+    ctx.strokeStyle='#FFD700';ctx.lineWidth=3;ctx.setLineDash([5,3]);
+    ctx.beginPath();ctx.roundRect(x1-3,y1-3,CELL+6,CELL+6,8);ctx.stroke();
+    ctx.strokeStyle='rgba(255,255,255,0.5)';ctx.setLineDash([]);
+    ctx.beginPath();ctx.roundRect(x2-3,y2-3,CELL+6,CELL+6,8);ctx.stroke();
+    ctx.fillStyle='#AAA';ctx.font='11px "Microsoft YaHei"';
+    ctx.fillText('1. 选中 →',x1+CELL/2,y1+CELL+20);
+    ctx.fillText('2. 交换',x2+CELL/2,y2+CELL+20);
+  }else if(tutorialStep===1){
+    ctx.fillStyle='#FFD700';ctx.font='bold 22px "Microsoft YaHei"';ctx.textAlign='center';
+    ctx.fillText('💎 第二步：部队出击',cx,cy-60);
+    ctx.fillStyle='#FFF';ctx.font='14px "Microsoft YaHei"';
+    ctx.fillText('凑齐 3 个同兵种即可出击得分',cx,cy-10);
+    ctx.fillText('出击获得援军，推动战线前进',cx,cy+20);
+    ctx.fillStyle='#4ECDC4';ctx.font='13px "Microsoft YaHei"';
+    ctx.fillText('🤝 3连→出击  ⚡4连→🪨投石车  ⭐5连→🧙法师',cx,cy+60);
+  }else if(tutorialStep===2){
+    ctx.fillStyle='#FFD700';ctx.font='bold 22px "Microsoft YaHei"';ctx.textAlign='center';
+    ctx.fillText('⚔ 第三步：战线推进',cx,cy-70);
+    ctx.fillStyle='#FFF';ctx.font='14px "Microsoft YaHei"';
+    ctx.fillText('援军满→战线向右推进1格（占领敌军据点）',cx,cy-30);
+    ctx.fillText('推到最右侧即胜利 🎉',cx,cy-5);
+    ctx.fillStyle='#FF6B6B';ctx.font='13px "Microsoft YaHei"';
+    ctx.fillText('⚠ 敌军持续增援→战线后退→退回城堡则失守',cx,cy+30);
+    ctx.fillStyle='#AA88CC';ctx.font='13px "Microsoft YaHei"';
+    ctx.fillText('💀 魔兵（紫色🛡）需从旁边攻击2次才能消灭',cx,cy+55);
+  }else if(tutorialStep===3){
+    ctx.fillStyle='#FFD700';ctx.font='bold 22px "Microsoft YaHei"';ctx.textAlign='center';
+    ctx.fillText('🌟 第四步：特殊兵种',cx,cy-70);
+    ctx.fillStyle='#FFF';ctx.font='13px "Microsoft YaHei"';
+    ctx.fillText('🪨 投石车：出击后砸毁3×3范围',cx,cy-25);
+    ctx.fillText('🧙 法师：出击后传送同兵种全屏出击',cx,cy+0);
+    ctx.fillStyle='#FF8C00';ctx.font='13px "Microsoft YaHei"';
+    ctx.fillText('🎺 连续3次推进触发骑士团冲锋→清右列+额外推进',cx,cy+25);
+    ctx.fillStyle='#FFD700';ctx.font='13px "Microsoft YaHei"';
+    ctx.fillText('🌟 战线过半场触发曙光时刻→10秒援军翻倍',cx,cy+50);
+  }
+
+  var label=tutorialStep===3?'开始游戏！':'下一步 →';
+  tutoNextBtn=btnRect(cx-70,CANVAS_H-60,140,36,label,'#FFD700');
+  ctx.fillStyle='#777';ctx.font='11px "Microsoft YaHei"';
+  ctx.fillText((tutorialStep+1)+'/4',cx,CANVAS_H-22);
+}
+
+// ===== 选关画面 =====
+function drawLevelSelect(){
+  ctx.fillStyle='rgba(0,0,0,0.85)';ctx.fillRect(0,0,CANVAS_W,CANVAS_H);
+  ctx.fillStyle='#FFD700';ctx.font='bold 24px "Microsoft YaHei"';ctx.textAlign='center';
+  ctx.fillText('选择关卡',CANVAS_W/2,40);
+
+  selectBtns=[];
+  var cols=5,btnW=100,btnH=60,gapX=24,gapY=20;
+  var startX=(CANVAS_W-(cols*btnW+(cols-1)*gapX))/2;
+  for(var i=0;i<10;i++){
+    var col=i%cols,row=Math.floor(i/cols);
+    var bx=startX+col*(btnW+gapX),by=80+row*(btnH+gapY);
+    var unlocked=i+1<=highLevel;
+    var lcfg=LEVEL_CONFIG[i];
+    var c=unlocked?'rgba(255,215,0,0.22)':'rgba(255,255,255,0.06)';
+    var s=unlocked?'rgba(255,215,0,0.5)':'rgba(255,255,255,0.1)';
+    drawRoundRect(bx,by,btnW,btnH,12,c,s);
+    ctx.fillStyle=unlocked?'#FFD700':'#555';ctx.font='bold 18px "Microsoft YaHei"';
+    ctx.fillText('第'+(i+1)+'关',bx+btnW/2,by+btnH/2-10);
+    ctx.font='10px "Microsoft YaHei"';
+    ctx.fillText(unlocked?lcfg.name:'🔒',bx+btnW/2,by+btnH/2+14);
+    if(unlocked)selectBtns.push({x:bx,y:by,w:btnW,h:btnH,id:'level_'+i,level:i+1});
+  }
+  var back=btnRect(CANVAS_W/2-70,CANVAS_H-50,140,36,'← 返回','rgba(255,255,255,0.15)');
+  selectBtns.push(back);
+}
+
+// ===== 触发教程 =====
+function startTutorial(){
+  phase='tutorial';tutorialStep=0;
+  createBoard();
+  var m=findMatches();if(m.matched.size>0)createBoard();
+}
+
+// ===== 棋盘逻辑 =====
+function initCell(type,extra){var hp=2;if(extra&&extra.hp)hp=extra.hp;return {type:type,offsetY:0,opacity:1,scale:1,special:0,shadowHP:(type===TYPE_SHADOW?hp:0),swapOffsetX:0,swapOffsetY:0,flashTimer:0,dropBounce:0,extra:extra};}
+function createBoard(){
+  var cfg=LEVEL_CONFIG[Math.min(level-1,LEVEL_CONFIG.length-1)]||LEVEL_CONFIG[0];
+  board=[];for(var r=0;r<ROWS;r++){board[r]=[];for(var c=0;c<COLS;c++){var t;do{t=rng(0,TYPES-1)}while(wouldMatch(r,c,t));if(cfg.disable!==undefined&&t===cfg.disable){do{t=rng(0,TYPES-1)}while(t===cfg.disable||wouldMatch(r,c,t));}board[r][c]=initCell(t);}}spawnShadowObstacles();
+}
+function wouldMatch(r,c,type){
+  if(type>=TYPES)return false;
+  if(c>=2&&board[r][c-1]&&board[r][c-2]&&board[r][c-1].type===type&&board[r][c-2].type===type)return true;
+  if(r>=2&&board[r-1]&&board[r-2]&&board[r-1][c]&&board[r-2][c]&&board[r-1][c].type===type&&board[r-2][c].type===type)return true;
+  return false;
+}
+function spawnShadowObstacles(){
+  var ss=Math.max(0,battleLinePos);if(ss>=COLS)return;
+  var cfg=LEVEL_CONFIG[Math.min(level-1,LEVEL_CONFIG.length-1)]||LEVEL_CONFIG[0];
+  var count=rng(1,Math.min(3,1+Math.floor(level/3)));
+  for(var i=0;i<count;i++){var c=rng(ss,COLS-1),r=rng(0,ROWS-1);if(board[r]&&board[r][c]&&board[r][c].type<TYPES&&board[r][c].shadowHP===0)board[r][c]=initCell(TYPE_SHADOW,{hp:cfg.shadowHP});}
+}
+function findMatches(){
+  var matched=new Set(),matchGroups=[];
+  for(var r=0;r<ROWS;r++){var c=0;while(c<COLS){var cell=board[r][c];if(!cell||cell.type>=TYPES){c++;continue;}var end=c;while(end+1<COLS&&board[r][end+1]&&board[r][end+1].type===cell.type)end++;var len=end-c+1;if(len>=3){var g={cells:[],length:len,type:cell.type,horizontal:true};for(var i=c;i<=end;i++){var k=r*COLS+i;matched.add(k);g.cells.push({r:r,c:i});}matchGroups.push(g);}c=end+1;}}
+  for(var c=0;c<COLS;c++){var r=0;while(r<ROWS){var cell=board[r][c];if(!cell||cell.type>=TYPES){r++;continue;}var end=r;while(end+1<ROWS&&board[end+1][c]&&board[end+1][c].type===cell.type)end++;var len=end-r+1;if(len>=3){var g={cells:[],length:len,type:cell.type,horizontal:false};for(var i=r;i<=end;i++){var k=i*COLS+c;matched.add(k);g.cells.push({r:i,c:c});}matchGroups.push(g);}r=end+1;}}
+  return {matched:matched,matchGroups:matchGroups};
+}
+function processShadowBlocks(toRemove){
+  var sa=new Set();
+  for(var key of toRemove){var r=Math.floor(key/COLS),c=key%COLS;for(var dr=-1;dr<=1;dr++)for(var dc=-1;dc<=1;dc++){if(Math.abs(dr)+Math.abs(dc)!==1)continue;var nr=r+dr,nc=c+dc;if(nr<0||nr>=ROWS||nc<0||nc>=COLS)continue;var idx=nr*COLS+nc;if(board[nr][nc]&&board[nr][nc].type===TYPE_SHADOW&&!toRemove.has(idx)){board[nr][nc].shadowHP--;if(board[nr][nc].shadowHP<=0)toRemove.add(idx);else{sa.add(idx);spawnFloatingText(BOARD_X+nc*(CELL+GAP)+CELL/2,BOARD_Y+nr*(CELL+GAP),'💀裂','#AA88CC');}}}}
+  return toRemove;
+}
+function processSpecialBlocks(matchedSet,matchGroups){
+  var toRemove=new Set(matchedSet);
+  for(var i=0;i<matchGroups.length;i++){var g=matchGroups[i];var mid=g.cells[Math.floor(g.cells.length/2)];var inLight=mid.c<battleLinePos;var cfg=LEVEL_CONFIG[Math.min(level-1,LEVEL_CONFIG.length-1)]||LEVEL_CONFIG[0];var roll=Math.random(),base=cfg.boostRainbow?0.7:0.5,lb=inLight?0.05:0;if(g.length===4&&roll<base+lb){board[mid.r][mid.c].special=1;board[mid.r][mid.c].type=TYPE_BOMB;toRemove.delete(mid.r*COLS+mid.c);}else if(g.length>=5&&roll<base+lb){board[mid.r][mid.c].special=2;board[mid.r][mid.c].type=TYPE_RAINBOW;toRemove.delete(mid.r*COLS+mid.c);}}
+  for(var key of toRemove){var r=Math.floor(key/COLS),c=key%COLS;if(board[r][c]&&board[r][c].type===TYPE_BOMB&&board[r][c].special===1){for(var dr=-1;dr<=1;dr++)for(var dc=-1;dc<=1;dc++){var nr=r+dr,nc=c+dc;if(nr>=0&&nr<ROWS&&nc>=0&&nc<COLS)toRemove.add(nr*COLS+nc);}spawnBombParticles(r,c);}}
+  for(var key of toRemove){var r=Math.floor(key/COLS),c=key%COLS;if(board[r][c]&&board[r][c].type===TYPE_RAINBOW&&board[r][c].special===2){var tc=-1;for(var k2 of toRemove){var r2=Math.floor(k2/COLS),c2=k2%COLS;if(board[r2][c2]&&board[r2][c2].type<TYPES&&!(r2===r&&c2===c)){tc=board[r2][c2].type;break;}}if(tc>=0){for(var rr=0;rr<ROWS;rr++)for(var cc=0;cc<COLS;cc++)if(board[rr][cc]&&board[rr][cc].type===tc)toRemove.add(rr*COLS+cc);}spawnRainbowParticles(r,c);}}
+  for(var key of toRemove){var r=Math.floor(key/COLS),c=key%COLS;if(board[r][c])board[r][c].special=0;}
+  return toRemove;
+}
+function removeAndCollapse(toRemove){
+  // 同步检测炸弹/彩虹（在 flashing 前确定）
+  var bt=false,rt=false;
+  for(var key of toRemove){var r=Math.floor(key/COLS),c=key%COLS;if(!board[r][c])continue;if(board[r][c].type===TYPE_BOMB)bt=true;if(board[r][c].type===TYPE_RAINBOW)rt=true;}
+  // Phase 1: 闪烁 + 粒子
+  for(var key of toRemove){var r=Math.floor(key/COLS),c=key%COLS;if(!board[r][c])continue;board[r][c].flashTimer=0.3;board[r][c].scale=1.4;board[r][c].opacity=1;spawnMatchParticles(r,c,board[r][c].type);}
+  // Phase 2: 延迟删除 + 下落 + 新方块入场
+  setTimeout(function(){
+    for(var key of toRemove){var r=Math.floor(key/COLS),c=key%COLS;if(!board[r][c])continue;board[r][c]=null;}
+    for(var c=0;c<COLS;c++){
+      var wr=ROWS-1,fallCount=0;
+      for(var r=ROWS-1;r>=0;r--){
+        if(board[r][c]!==null){
+          if(r!==wr){board[wr][c]=board[r][c];board[wr][c].offsetY=(wr-r)*(CELL+GAP);board[wr][c].dropBounce=1;board[r][c]=null;}wr--;
+        }else{fallCount++;}
+      }
+      for(var r=wr;r>=0;r--){
+        board[r][c]=initCell(rng(0,TYPES-1));
+        board[r][c].offsetY=-(fallCount+(wr-r))*(CELL+GAP);
+        board[r][c].dropBounce=1;board[r][c].scale=0.5;
+      }
+    }
+  },200);
+  return {removed:toRemove.size,bombTriggered:bt,rainbowTriggered:rt};
+}
+function spawnMatchParticles(r,c,ct){
+  var cx2=BOARD_X+c*(CELL+GAP)+CELL/2,cy2=BOARD_Y+r*(CELL+GAP)+CELL/2;
+  var cl=(ct>=0&&ct<TYPES)?BLOCK_COLORS[ct]:'#FFF';
+  for(var i=0;i<16;i++){var a=Math.random()*Math.PI*2,s=3+Math.random()*6;particles.push({x:cx2,y:cy2,vx:Math.cos(a)*s,vy:Math.sin(a)*s-3,life:1,decay:.018+Math.random()*.04,size:2+Math.random()*5,color:cl});}
+  // 额外小白色亮点
+  for(var i=0;i<6;i++){particles.push({x:cx2+Math.random()*20-10,y:cy2+Math.random()*20-10,vx:(Math.random()-.5)*2,vy:-Math.random()*4-4,life:.6,decay:.03,size:1+Math.random()*2,color:'#FFF'});}
+}
+function spawnBombParticles(r,c){
+  var cx2=BOARD_X+c*(CELL+GAP)+CELL/2,cy2=BOARD_Y+r*(CELL+GAP)+CELL/2;
+  for(var i=0;i<40;i++){var a=Math.random()*Math.PI*2,s=5+Math.random()*12;particles.push({x:cx2,y:cy2,vx:Math.cos(a)*s,vy:Math.sin(a)*s-6,life:1,decay:.012+Math.random()*.03,size:4+Math.random()*7,color:Math.random()>.5?'#FF6B6B':'#FFD93D'});}
+  // 冲击波环
+  for(var i=0;i<12;i++){var a=i*Math.PI/6,s=25;particles.push({x:cx2+Math.cos(a)*s,y:cy2+Math.sin(a)*s,vx:Math.cos(a)*2,vy:Math.sin(a)*2,life:.5,decay:.04,size:3,color:'rgba(255,200,50,0.8)'});}
+  shakeAmount=14;
+}
+function spawnRainbowParticles(r,c){
+  var cx2=BOARD_X+c*(CELL+GAP)+CELL/2,cy2=BOARD_Y+r*(CELL+GAP)+CELL/2;
+  var cs=['#FF6B6B','#FFD93D','#4ECDC4','#A78BFA','#FB923C','#60A5FA'];
+  for(var i=0;i<50;i++){var a=Math.random()*Math.PI*2,s=4+Math.random()*10;particles.push({x:cx2,y:cy2,vx:Math.cos(a)*s,vy:Math.sin(a)*s-4,life:1,decay:.01+Math.random()*.025,size:3+Math.random()*6,color:cs[rng(0,5)]});}
+  // 彩虹星爆
+  for(var i=0;i<20;i++){var a=i*Math.PI/10;particles.push({x:cx2+Math.cos(a)*30,y:cy2+Math.sin(a)*30,vx:Math.cos(a)*1.5,vy:Math.sin(a)*1.5,life:.7,decay:.03,size:4,color:cs[i%6]});}
+  shakeAmount=8;
+}
+function spawnFloatingText(x,y,text,color){floatingTexts.push({x:x,y:y,text:text,color:color,life:1,vy:-2.5});}
+function swapBlocks(r1,c1,r2,c2){var t=board[r1][c1];board[r1][c1]=board[r2][c2];board[r2][c2]=t;}
+function isValidMove(r1,c1,r2,c2){
+  if(dist(r1,c1,r2,c2)!==1)return false;
+  if(board[r1][c1].type===TYPE_SHADOW||board[r2][c2].type===TYPE_SHADOW)return false;
+  var t1=board[r1][c1].type,t2=board[r2][c2].type;
+  if(t1>=TYPES||t2>=TYPES)return true;
+  swapBlocks(r1,c1,r2,c2);var m=findMatches();swapBlocks(r1,c1,r2,c2);
+  return m.matched.size>0;
+}
+function hasValidMoves(){
+  for(var r=0;r<ROWS;r++)for(var c=0;c<COLS;c++){
+    if(board[r][c]&&board[r][c].type===TYPE_SHADOW)continue;
+    for(var d=0;d<2;d++){var dr=[0,1][d],dc=[1,0][d];var nr=r+dr,nc=c+dc;if(nr>=ROWS||nc>=COLS)continue;
+      if(board[nr][nc]&&board[nr][nc].type===TYPE_SHADOW)continue;
+      var t1=board[r][c].type,t2=board[nr][nc].type;
+      if(t1>=TYPES||t2>=TYPES)return true;
+      swapBlocks(r,c,nr,nc);var m=findMatches();swapBlocks(r,c,nr,nc);
+      if(m.matched.size>0)return true;
+    }
+  }return false;
+}
+function reshuffleBoard(){
+  var types=[];for(var r=0;r<ROWS;r++)for(var c=0;c<COLS;c++)if(board[r][c]&&board[r][c].type<TYPES)types.push(board[r][c].type);
+  for(var i=types.length-1;i>0;i--){var j=rng(0,i);var _=types[i];types[i]=types[j];types[j]=_;}
+  var idx=0;for(var r=0;r<ROWS;r++)for(var c=0;c<COLS;c++)if(board[r][c]&&board[r][c].type<TYPES)board[r][c]=initCell(types[idx++]);
+  for(var r=0;r<ROWS;r++)for(var c=0;c<COLS;c++)if(board[r][c]&&board[r][c].type>=TYPES&&board[r][c].type!==TYPE_SHADOW)board[r][c]=initCell(rng(0,TYPES-1));
+  spawnFloatingText(CANVAS_W/2,CANVAS_H/2,'🎖 重新布阵','#FFD93D');
+}
+
+// ===== 动画 =====
+function animateSwap(r1,c1,r2,c2,cb){
+  var c1d=board[r1][c1],c2d=board[r2][c2],st=performance.now(),dur=200;
+  function step(now){var t=Math.min((now-st)/dur,1),e=t<.5?2*t*t:1-Math.pow(-2*t+2,2)/2;if(c1d){c1d.swapOffsetX=(c2-c1)*(CELL+GAP)*(1-e);c1d.swapOffsetY=(r2-r1)*(CELL+GAP)*(1-e);}if(c2d){c2d.swapOffsetX=(c1-c2)*(CELL+GAP)*(1-e);c2d.swapOffsetY=(r1-r2)*(CELL+GAP)*(1-e);}if(t<1)requestAnimationFrame(step);else{if(c1d)c1d.swapOffsetX=c1d.swapOffsetY=0;if(c2d)c2d.swapOffsetX=c2d.swapOffsetY=0;cb();}}
+  requestAnimationFrame(step);
+}
+function advanceBattleLine(){
+  var prev=battleLinePos;battleLinePos=Math.min(LINE_MAX,battleLinePos+1);consecutiveAdvances++;
+  spawnFloatingText(CANVAS_W/2,BOARD_Y-28,consecutiveAdvances>=3?'🎺 骑士团冲锋！':'⚔ 战线推进！','#FFD700');
+  for(var i=0;i<15;i++)particles.push({x:CANVAS_W*.3+Math.random()*CANVAS_W*.4,y:BOARD_Y-10,vx:(Math.random()-.5)*3,vy:-Math.random()*5-2,life:1,decay:.03+Math.random()*.05,size:2+Math.random()*4,color:'#FFD700'});
+  if(consecutiveAdvances>=3){var cfg=LEVEL_CONFIG[Math.min(level-1,LEVEL_CONFIG.length-1)]||LEVEL_CONFIG[0];consecutiveAdvances=0;var tr=new Set();for(var r=0;r<ROWS;r++){if(board[r][COLS-1])tr.add(r*COLS+COLS-1);}if(tr.size>0)removeAndCollapse(tr);var extra=cfg.extraCharge||1;battleLinePos=Math.min(LINE_MAX,battleLinePos+extra);spawnFloatingText(CANVAS_W/2,BOARD_Y-46,'🎺 额外突进+'+extra+'格!','#FF8C00');shakeAmount=12;}
+  if(prev<=MIDPOINT&&battleLinePos>MIDPOINT&&!nixiActive){nixiActive=true;nixiTimer=10;spawnFloatingText(CANVAS_W/2,BOARD_Y-64,'🌟 曙光时刻！援军翻倍！','#FFD700');shakeAmount=10;}
+  if(battleLinePos>=LINE_MAX&&gameState!==3)endGame(true);
+}
+function processMatches(){
+  var r=findMatches();
+  if(r.matched.size===0){if(lastSwapHadSpecial&&handleLoneSpecialBlock()){lastSwapHadSpecial=false;return;}comboCount=0;lastSwapHadSpecial=false;if(!hasValidMoves())reshuffleBoard();gameState=0;return;}
+  lastSwapHadSpecial=false;comboCount++;
+  var toRemove=processSpecialBlocks(r.matched,r.matchGroups);processShadowBlocks(toRemove);
+  var res=removeAndCollapse(toRemove);
+  var eg=toRemove.size*5+(res.bombTriggered?15:0)+(res.rainbowTriggered?25:0);
+  var inLight=false;for(var k of r.matched){if(k%COLS<battleLinePos){inLight=true;break;}}
+  if(inLight)eg=Math.floor(eg*1.2);if(nixiActive)eg*=2;
+  energy=Math.min(ENERGY_MAX,energy+eg);
+  score+=toRemove.size*10+(comboCount>1?comboCount*10:0)+(res.bombTriggered?30:0)+(res.rainbowTriggered?50:0);
+  var arr=Array.from(r.matched);if(arr.length>0){var mk=arr[Math.floor(arr.length/2)],mr=Math.floor(mk/COLS),mc=mk%COLS;var cx2=BOARD_X+mc*(CELL+GAP)+CELL/2,cy2=BOARD_Y+mr*(CELL+GAP);var fb='援军+'+eg;if(inLight)fb+=' ✨';if(nixiActive)fb+=' ⚡';spawnFloatingText(cx2,cy2,fb,'#4ECDC4');if(res.bombTriggered)spawnFloatingText(cx2,cy2-22,'🪨投石车！','#FF6B6B');if(res.rainbowTriggered)spawnFloatingText(cx2,cy2-22,'🧙法师传送！','#FFD93D');if(comboCount>=3)spawnFloatingText(cx2,cy2-42,comboCount+'连携！','#FFD700');}
+  while(energy>=ENERGY_MAX){energy-=ENERGY_MAX;advanceBattleLine();}
+  setTimeout(function(){processMatches();},450);
+}
+function handleLoneSpecialBlock(){
+  for(var r=0;r<ROWS;r++)for(var c=0;c<COLS;c++){
+    if(!board[r][c]||board[r][c].special!==1&&board[r][c].special!==2)continue;
+    if(board[r][c].type===TYPE_BOMB&&board[r][c].special===1){
+      var tr=new Set();for(var dr=-1;dr<=1;dr++)for(var dc=-1;dc<=1;dc++){var nr=r+dr,nc=c+dc;if(nr>=0&&nr<ROWS&&nc>=0&&nc<COLS)tr.add(nr*COLS+nc);}
+      spawnBombParticles(r,c);removeAndCollapse(tr);energy=Math.min(ENERGY_MAX,energy+tr.size*5+15);score+=tr.size*10+30;
+      spawnFloatingText(BOARD_X+c*(CELL+GAP)+CELL/2,BOARD_Y+r*(CELL+GAP),'🪨投石车轰击！','#FF6B6B');
+      while(energy>=ENERGY_MAX){energy-=ENERGY_MAX;advanceBattleLine();}setTimeout(function(){processMatches();},450);return true;
+    }
+    if(board[r][c].type===TYPE_RAINBOW&&board[r][c].special===2){
+      var cnts={};for(var rr=0;rr<ROWS;rr++)for(var cc=0;cc<COLS;cc++)if(board[rr][cc]&&board[rr][cc].type<TYPES){var t=board[rr][cc].type;cnts[t]=(cnts[t]||0)+1;}
+      var mc=-1,mcnt=0;for(var cl in cnts){if(cnts[cl]>mcnt){mcnt=cnts[cl];mc=parseInt(cl);}}
+      if(mc>=0){var tr=new Set();for(var rr=0;rr<ROWS;rr++)for(var cc=0;cc<COLS;cc++)if(board[rr][cc]&&board[rr][cc].type===mc)tr.add(rr*COLS+cc);tr.add(r*COLS+c);
+        spawnRainbowParticles(r,c);removeAndCollapse(tr);energy=Math.min(ENERGY_MAX,energy+tr.size*5+25);score+=tr.size*10+50;
+        spawnFloatingText(BOARD_X+c*(CELL+GAP)+CELL/2,BOARD_Y+r*(CELL+GAP),'🧙法师传送！','#FFD93D');
+        while(energy>=ENERGY_MAX){energy-=ENERGY_MAX;advanceBattleLine();}setTimeout(function(){processMatches();},450);return true;}
+    }
+  }return false;
+}
+function endGame(win){gameState=3;isWin=win;if(win&&level>=highLevel){highLevel=level+1;saveHigh();}nixiActive=false;}
+
+function restartGame(){
+  score=0;totalMoves=0;energy=0;enemyPressure=0;pressureAccum=0;consecutiveAdvances=0;nixiActive=false;nixiTimer=0;comboCount=0;selectedRow=-1;selectedCol=-1;particles=[];floatingTexts=[];lineParticles=[];shakeAmount=0;gameState=0;isWin=false;
+  // 读取关卡配置
+  var cfg=LEVEL_CONFIG[Math.min(level-1,LEVEL_CONFIG.length-1)]||LEVEL_CONFIG[0];
+  pressureRate=cfg.pressure;
+   battleLinePos=cfg.startLine;
+   stormTimer=0;
+  createBoard();
+  // 初始暗影魔兵
+  for(var i=0;i<cfg.shadow;i++){
+    var cr=rng(battleLinePos,COLS-1);if(cr>=COLS)cr=COLS-1;
+    var rr=rng(0,ROWS-1);
+    if(board[rr][cr]&&board[rr][cr].type<TYPES&&board[rr][cr].shadowHP===0)board[rr][cr]=initCell(TYPE_SHADOW,{hp:cfg.shadowHP});
+  }
+}
+function nextLevel(){level++;restartGame();}
+function reviveGame(){
+  battleLinePos=Math.min(LINE_MAX,battleLinePos+3);enemyPressure=0;pressureAccum=0;energy=ENERGY_MAX/2;consecutiveAdvances=0;gameState=0;selectedRow=-1;selectedCol=-1;shakeAmount=0;for(var r=0;r<ROWS;r++)for(var c=0;c<COLS;c++)if(board[r][c]&&board[r][c].type===TYPE_SHADOW)board[r][c]=initCell(rng(0,TYPES-1));spawnFloatingText(CANVAS_W/2,BOARD_Y-34,'📜 援军文书！+3格！','#4ECDC4');
+}
+
+// ===== 输入 =====
+function handleClick(row,col){
+  if(gameState!==0&&gameState!==1)return;
+  if(board[row][col].type===TYPE_SHADOW){if(selectedRow>=0){selectedRow=-1;selectedCol=-1;gameState=0;}return;}
+  if(selectedRow===-1){selectedRow=row;selectedCol=col;gameState=1;if(board[row][col])board[row][col].scale=1.15;}
+  else if(selectedRow===row&&selectedCol===col){selectedRow=-1;selectedCol=-1;gameState=0;}
+  else if(dist(selectedRow,selectedCol,row,col)===1){
+    var sr=selectedRow,sc=selectedCol;selectedRow=-1;selectedCol=-1;
+    if(isValidMove(sr,sc,row,col)){gameState=2;totalMoves++;var t1=board[sr][sc].type,t2=board[row][col].type;lastSwapHadSpecial=(t1>=TYPES&&t1!==TYPE_SHADOW)||(t2>=TYPES&&t2!==TYPE_SHADOW);swapBlocks(sr,sc,row,col);animateSwap(sr,sc,row,col,function(){processMatches();});}
+    else{gameState=2;swapBlocks(sr,sc,row,col);setTimeout(function(){swapBlocks(sr,sc,row,col);gameState=0;},200);}
+  }else{selectedRow=row;selectedCol=col;gameState=1;if(board[row][col])board[row][col].scale=1.15;}
+}
+
+// ===== 绘制 =====
+function drawLightCastle(){
+ var t=animTime,cx2=CAMP_X+CAMP_W/2,cy2=CAMP_Y+CAMP_H/2,by=CAMP_Y+CAMP_H-18;
+ // 城堡主体
+ var cg=ctx.createLinearGradient(cx2-28,0,cx2+28,0);cg.addColorStop(0,'#8B7355');cg.addColorStop(0.3,'#D4B895');cg.addColorStop(0.5,'#F0D9B5');cg.addColorStop(0.7,'#D4B895');cg.addColorStop(1,'#8B7355');
+ ctx.fillStyle=cg;ctx.beginPath();ctx.moveTo(cx2-24,by-4);ctx.lineTo(cx2-20,by-66);ctx.lineTo(cx2-8,by-70);ctx.lineTo(cx2+8,by-70);ctx.lineTo(cx2+20,by-66);ctx.lineTo(cx2+24,by-4);ctx.closePath();ctx.fill();
+ // 城堡窗户
+ for(var i=0;i<2;i++){var wy=by-58+i*18;ctx.fillStyle='rgba(255,215,0,'+(0.5+Math.sin(t*3+i)*0.3)+')';ctx.fillRect(cx2-10,wy,6,8);ctx.fillRect(cx2+4,wy,6,8);}
+ // 城门
+ ctx.fillStyle='#5C3D2E';ctx.fillRect(cx2-8,by-22,16,18);
+ ctx.strokeStyle='#8B7355';ctx.lineWidth=1.5;ctx.strokeRect(cx2-8,by-22,16,18);
+ // 旗帜
+ var flagX=cx2+Math.sin(t*2)*1.5;ctx.strokeStyle='#5C3D2E';ctx.lineWidth=2;ctx.beginPath();ctx.moveTo(cx2,by-70);ctx.lineTo(cx2,by-85);ctx.stroke();
+ ctx.fillStyle='#FFD700';ctx.beginPath();ctx.moveTo(cx2,by-85);ctx.lineTo(cx2,by-78);ctx.lineTo(cx2+12,by-81.5);ctx.closePath();ctx.fill();
+ // 旗帜飘动
+ var flag2X=cx2-16+Math.sin(t*2.2)*1.5;ctx.strokeStyle='#5C3D2E';ctx.lineWidth=1.5;ctx.beginPath();ctx.moveTo(cx2-16,by-66);ctx.lineTo(cx2-16,by-80);ctx.stroke();
+ ctx.fillStyle='#FFD700';ctx.beginPath();ctx.moveTo(cx2-16,by-80);ctx.lineTo(cx2-16,by-74);ctx.lineTo(cx2-6,by-77);ctx.closePath();ctx.fill();
+ // 城墙地基
+ ctx.fillStyle='#6B5B4F';ctx.fillRect(cx2-28,by-4,56,8);
+ // 标签
+ ctx.fillStyle='#FFD700';ctx.font='bold 11px "Microsoft YaHei"';ctx.textAlign='center';ctx.fillText('🏰 光明城堡',cx2,CAMP_Y+10);
+ ctx.fillStyle='rgba(255,255,200,0.5)';ctx.font='9px "Microsoft YaHei"';ctx.fillText('己方营地',cx2,CAMP_Y+CAMP_H-2);
+}
+function drawDarkTower(){
+ var t=animTime,cx2=CRYSTAL_X+CRYSTAL_W/2,cy2=CRYSTAL_Y+CRYSTAL_H/2,by=CRYSTAL_Y+CRYSTAL_H-18;
+ // 黑暗光环
+ var ag=ctx.createRadialGradient(cx2,by-30,0,cx2,by-30,40);ag.addColorStop(0,'rgba(100,20,140,0.3)');ag.addColorStop(1,'rgba(0,0,0,0)');ctx.fillStyle=ag;ctx.beginPath();ctx.ellipse(cx2,by+4,42,16,0,0,Math.PI*2);ctx.fill();
+ // 塔身
+ var tg=ctx.createLinearGradient(cx2-20,0,cx2+20,0);tg.addColorStop(0,'#2D1B4E');tg.addColorStop(0.5,'#4A2C6E');tg.addColorStop(1,'#1A0A2E');
+ ctx.fillStyle=tg;ctx.beginPath();ctx.moveTo(cx2-20,by-4);ctx.lineTo(cx2-16,by-70);ctx.lineTo(cx2-6,by-74);ctx.lineTo(cx2+6,by-74);ctx.lineTo(cx2+16,by-70);ctx.lineTo(cx2+20,by-4);ctx.closePath();ctx.fill();
+ // 塔顶尖刺
+ ctx.fillStyle='#6B3FA0';ctx.beginPath();ctx.moveTo(cx2-5,by-74);ctx.lineTo(cx2+5,by-74);ctx.lineTo(cx2,by-88);ctx.closePath();ctx.fill();
+ // 塔窗户（紫色邪光）
+ for(var i=0;i<2;i++){var wy=by-60+i*20;var wa=0.4+Math.sin(t*4+i*1.3)*0.3;ctx.fillStyle='rgba(200,50,200,'+wa+')';ctx.fillRect(cx2-5,wy,4,7);ctx.fillRect(cx2+2,wy,4,7);}
+ // 飘散紫烟
+ for(var i=0;i<4;i++){var sa=t*0.8+i*1.7,sx=cx2-15+Math.sin(sa)*25,sy=by-20-i*8+Math.cos(sa*1.3)*8;var sa2=0.15+Math.sin(sa)*0.1;ctx.fillStyle='rgba(180,60,220,'+sa2+')';ctx.beginPath();ctx.arc(sx,sy,4+i*1.5,0,Math.PI*2);ctx.fill();}
+ // 标签
+ ctx.fillStyle='#E080D0';ctx.font='bold 11px "Microsoft YaHei"';ctx.textAlign='center';ctx.fillText('🗼 暗渊高塔',cx2,CRYSTAL_Y+10);
+ ctx.fillStyle='rgba(255,200,255,0.5)';ctx.font='9px "Microsoft YaHei"';ctx.fillText('敌军要塞',cx2,CRYSTAL_Y+CRYSTAL_H-2);
+}
+function drawBattleLineTrack(){
+ var t=animTime,tx=TRACK_X,ty=TRACK_Y,tw=TRACK_W,th=TRACK_H;
+ var bg2=ctx.createLinearGradient(tx,0,tx+tw,0);bg2.addColorStop(0,'rgba(10,20,60,0.7)');bg2.addColorStop(0.5,'rgba(30,20,50,0.7)');bg2.addColorStop(1,'rgba(40,10,40,0.7)');
+ ctx.fillStyle=bg2;ctx.beginPath();ctx.roundRect(tx-4,ty-4,tw+8,th+8,12);ctx.fill();ctx.strokeStyle='rgba(120,100,180,0.3)';ctx.lineWidth=1;ctx.beginPath();ctx.roundRect(tx-4,ty-4,tw+8,th+8,12);ctx.stroke();
+ var lineX=tx+(tw/LINE_MAX)*battleLinePos;
+ if(lineX>tx){var lg=ctx.createLinearGradient(tx,0,lineX,0);lg.addColorStop(0,'rgba(255,215,0,0.5)');lg.addColorStop(1,'rgba(255,180,0,0.8)');ctx.fillStyle=lg;ctx.beginPath();ctx.roundRect(tx,ty,tw/LINE_MAX*battleLinePos,th,10);ctx.fill();}
+ if(lineX<tx+tw){var dg=ctx.createLinearGradient(lineX,0,tx+tw,0);dg.addColorStop(0,'rgba(100,20,140,0.5)');dg.addColorStop(1,'rgba(60,10,80,0.7)');ctx.fillStyle=dg;ctx.beginPath();ctx.roundRect(lineX,ty,tx+tw-lineX,th,10);ctx.fill();}
+ for(var i=0;i<=LINE_MAX;i++){var nx=tx+(tw/LINE_MAX)*i,lit=i<=battleLinePos;ctx.fillStyle=lit?'#FFD700':'rgba(150,100,180,0.6)';ctx.beginPath();ctx.arc(nx,ty+th/2,lit?4:3,0,Math.PI*2);ctx.fill();if(lit){ctx.fillStyle='rgba(255,215,0,0.3)';ctx.beginPath();ctx.arc(nx,ty+th/2,7,0,Math.PI*2);ctx.fill();}}
+ if(!lastLineParticleSpawn||t-lastLineParticleSpawn>0.08){lastLineParticleSpawn=t;lineParticles.push({x:tx-10,life:1,speed:80+Math.random()*40});}
+ for(var i=lineParticles.length-1;i>=0;i--){var lp=lineParticles[i];lp.x+=lp.speed*0.016;lp.life-=0.005;if(lp.x>tx+tw||lp.life<=0){lineParticles.splice(i,1);continue;}ctx.fillStyle=lp.x<=lineX?'rgba(255,215,0,'+lp.life+')':'rgba(200,100,220,'+(lp.life*0.6)+')';ctx.beginPath();ctx.arc(lp.x,ty+th/2,Math.max(0.01,2*lp.life),0,Math.PI*2);ctx.fill();}
+ var gg=ctx.createRadialGradient(lineX,ty+th/2,0,lineX,ty+th/2,18);gg.addColorStop(0,'#FFD700');gg.addColorStop(0.3,'#FF8C00');gg.addColorStop(1,'rgba(255,140,0,0)');ctx.fillStyle=gg;ctx.beginPath();ctx.arc(lineX,ty+th/2,18+Math.sin(t*4)*2,0,Math.PI*2);ctx.fill();
+ ctx.fillStyle='#FFF';ctx.beginPath();ctx.arc(lineX,ty+th/2,4,0,Math.PI*2);ctx.fill();ctx.strokeStyle='rgba(255,255,255,0.8)';ctx.lineWidth=1.5;ctx.beginPath();ctx.arc(lineX,ty+th/2,4,0,Math.PI*2);ctx.stroke();
+ var label=nixiActive?'🌟曙光时刻！':'⚔ 战场前线';ctx.fillStyle=nixiActive?'#FF8C00':'#FFD700';ctx.font='bold 11px "Microsoft YaHei"';ctx.textAlign='center';ctx.fillText(label,lineX,ty-7);
+}
+function drawInfoBars(){
+ var ix=TRACK_X,iy=TRACK_Y+TRACK_H+6,iw=TRACK_W,barH=10,barY=iy;
+ ctx.fillStyle='rgba(0,0,0,0.5)';ctx.beginPath();ctx.roundRect(ix,barY,iw,barH,5);ctx.fill();
+ var ef=(energy/ENERGY_MAX)*iw;if(ef>0){var eg=ctx.createLinearGradient(ix,0,ix+iw,0);eg.addColorStop(0,'#4ECDC4');eg.addColorStop(0.5,'#FFD93D');eg.addColorStop(1,'#FF6B6B');ctx.fillStyle=eg;ctx.beginPath();ctx.roundRect(ix,barY,ef,barH,5);ctx.fill();}
+ ctx.fillStyle='#FFF';ctx.font='bold 9px "Microsoft YaHei"';ctx.textAlign='center';ctx.fillText('⚔ 援军:'+Math.floor(energy)+'/'+ENERGY_MAX+(nixiActive?' ⚡x2':''),ix+iw/2,barY+8);
+ var r2Y=barY+barH+14;ctx.fillStyle='#AAA';ctx.font='bold 9px "Microsoft YaHei"';ctx.textAlign='left';ctx.fillText('敌军增援:'+Math.floor(enemyPressure)+'%',ix,r2Y);ctx.textAlign='center';ctx.fillText('战线:'+battleLinePos+'/'+LINE_MAX,ix+iw/2,r2Y);ctx.textAlign='right';if(consecutiveAdvances>0)ctx.fillText('连续冲锋:'+consecutiveAdvances+'/3',ix+iw,r2Y);else ctx.fillText('步数:'+totalMoves,ix+iw,r2Y);
+ if(nixiActive){ctx.fillStyle='#FF8C00';ctx.font='bold 10px "Microsoft YaHei"';ctx.textAlign='center';ctx.fillText('🌟 曙光时刻:'+nixiTimer.toFixed(1)+'s',ix+iw/2,r2Y+14);}
+}
+function drawBlock(row,col,cell){
+ var x=BOARD_X+col*(CELL+GAP),y=BOARD_Y+row*(CELL+GAP),ox=cell.swapOffsetX||0,oy=cell.swapOffsetY||0,offY=cell.offsetY||0,sc=cell.scale||1,alpha=cell.opacity||1;
+ if(alpha<=0.01)return;
+ var cxx=x+CELL/2+ox,cyy=y+CELL/2+oy+offY;ctx.save();ctx.translate(cxx,cyy);ctx.scale(sc,sc);ctx.globalAlpha=alpha;
+ // 闪烁白色高光
+ var flash=cell.flashTimer>0?(cell.flashTimer/0.3):0;
+ if(flash>0){ctx.fillStyle='rgba(255,255,255,'+(flash*0.6)+')';ctx.beginPath();ctx.roundRect(-CELL/2-2,-CELL/2-2,CELL+4,CELL+4,12);ctx.fill();}
+ if(cell.type===TYPE_SHADOW){var hp=cell.shadowHP||2,sa=.5+(hp/2)*.5;var g1=ctx.createRadialGradient(0,0,CELL*.05,0,0,CELL*.5);g1.addColorStop(0,'#6B3FA0');g1.addColorStop(0.7,'#2D1B4E');g1.addColorStop(1,'#1A0A2E');drawRoundRect(-CELL/2+2,-CELL/2+2,CELL-4,CELL-4,10,g1);ctx.fillStyle='rgba(200,150,255,'+sa+')';ctx.font='bold 18px sans-serif';ctx.textAlign='center';ctx.textBaseline='middle';ctx.fillText('💀',0,0);ctx.fillStyle='#AA88CC';ctx.font='bold 9px sans-serif';ctx.fillText(hp,CELL/2-10,-CELL/2+11);}
+ else if(cell.type===TYPE_BOMB){var g2=ctx.createRadialGradient(0,0,CELL*.1,0,0,CELL*.5);g2.addColorStop(0,'#8B4513');g2.addColorStop(0.5,'#A0522D');g2.addColorStop(1,'#4A2000');drawRoundRect(-CELL/2+2,-CELL/2+2,CELL-4,CELL-4,10,g2);ctx.fillStyle='#FFD93D';ctx.beginPath();ctx.arc(0,-CELL*.15,3,0,Math.PI*2);ctx.fill();ctx.font='bold 18px sans-serif';ctx.textAlign='center';ctx.textBaseline='middle';ctx.fillText('🪨',0,3);}
+ else if(cell.type===TYPE_RAINBOW){var g3=ctx.createRadialGradient(0,0,CELL*.1,0,0,CELL*.5);g3.addColorStop(0,'#FFF');g3.addColorStop(0.3,'#FFD93D');g3.addColorStop(0.6,'#FF6B6B');g3.addColorStop(1,'#A78BFA');drawRoundRect(-CELL/2+2,-CELL/2+2,CELL-4,CELL-4,10,g3);ctx.font='bold 18px sans-serif';ctx.textAlign='center';ctx.textBaseline='middle';ctx.fillText('🧙',0,2);}
+ else{var ci=cell.type%TYPES;drawRoundRect(-CELL/2+1,-CELL/2+3,CELL-2,CELL-2,10,BLOCK_DARK[ci]);var g4=ctx.createLinearGradient(-CELL/2,-CELL/2,CELL/2,CELL/2);g4.addColorStop(0,BLOCK_LIGHT[ci]);g4.addColorStop(0.5,BLOCK_COLORS[ci]);g4.addColorStop(1,BLOCK_DARK[ci]);drawRoundRect(-CELL/2+1,-CELL/2+1,CELL-4,CELL-4,10,g4);ctx.fillStyle='rgba(255,255,255,0.35)';ctx.beginPath();ctx.ellipse(-CELL*.15,-CELL*.2,CELL*.2,CELL*.15,-0.5,0,Math.PI*2);ctx.fill();ctx.fillStyle='#FFF';ctx.font='bold 16px sans-serif';ctx.textAlign='center';ctx.textBaseline='middle';ctx.shadowColor='rgba(0,0,0,0.3)';ctx.shadowBlur=2;ctx.fillText(BLOCK_EMOJI[ci],0,1);ctx.shadowBlur=0;}
+ ctx.restore();
+}
+
+function render(){
+ ctx.clearRect(0,0,CANVAS_W,CANVAS_H);
+ var bg2=ctx.createRadialGradient(CANVAS_W/2,CANVAS_H/2,0,CANVAS_W/2,CANVAS_H/2,CANVAS_W*.7);bg2.addColorStop(0,'#151030');bg2.addColorStop(1,'#0a0a18');ctx.fillStyle=bg2;ctx.fillRect(0,0,CANVAS_W,CANVAS_H);
+
+ if(phase==='playing'||phase==='tutorial'){
+   var sdx=0,sdy=0;if(shakeAmount>0.1){sdx=(Math.random()-.5)*shakeAmount*2;sdy=(Math.random()-.5)*shakeAmount*2;}
+   ctx.save();ctx.translate(sdx,sdy);
+   drawLightCastle();drawDarkTower();drawBattleLineTrack();drawInfoBars();
+   var bw2=BOARD_W,bh2=BOARD_H;var lightEnd=BOARD_X+(battleLinePos/COLS)*bw2;
+   if(lightEnd>BOARD_X){ctx.fillStyle='rgba(255,215,0,0.04)';ctx.fillRect(BOARD_X-8,BOARD_Y-8,lightEnd-BOARD_X+8,bh2+16);}
+   if(battleLinePos<COLS){var sx2=BOARD_X+(battleLinePos/COLS)*bw2;ctx.fillStyle='rgba(80,20,120,0.08)';ctx.fillRect(sx2,BOARD_Y-8,BOARD_X+bw2+8-sx2,bh2+16);}
+   drawRoundRect(BOARD_X-8,BOARD_Y-8,bw2+16,bh2+16,12,'rgba(0,0,0,0.45)','rgba(255,255,255,0.08)');
+   for(var r=0;r<ROWS;r++)for(var c=0;c<COLS;c++)if(board[r][c])drawBlock(r,c,board[r][c]);
+   // selection
+   if(selectedRow>=0&&gameState===1){
+     var sx3=BOARD_X+selectedCol*(CELL+GAP),sy3=BOARD_Y+selectedRow*(CELL+GAP),pulse=Math.sin(animTime*3)*0.3+0.7;
+     ctx.strokeStyle='rgba(255,215,0,'+pulse+')';ctx.lineWidth=3;drawRoundRect(sx3-3,sy3-3,CELL+6,CELL+6,11,null,'rgba(255,215,0,'+pulse+')');
+     for(var dr=-1;dr<=1;dr++)for(var dc=-1;dc<=1;dc++){if(Math.abs(dr)+Math.abs(dc)!==1)continue;var nr=selectedRow+dr,nc=selectedCol+dc;if(nr<0||nr>=ROWS||nc<0||nc>=COLS||(board[nr][nc]&&board[nr][nc].type===TYPE_SHADOW))continue;var nx2=BOARD_X+nc*(CELL+GAP),ny2=BOARD_Y+nr*(CELL+GAP);drawRoundRect(nx2-1,ny2-1,CELL+2,CELL+2,11,null,'rgba(255,255,255,0.4)');}
+   }
+   ctx.restore();
+   // top bar
+   var cfg=LEVEL_CONFIG[Math.min(level-1,LEVEL_CONFIG.length-1)]||LEVEL_CONFIG[0];
+   ctx.fillStyle='#FFD700';ctx.font='bold 18px "Microsoft YaHei"';ctx.textAlign='center';ctx.fillText('⚔ 逆袭战线 ⚔',CANVAS_W/2,16);
+   ctx.font='bold 12px "Microsoft YaHei"';ctx.fillText('第'+level+'关 · '+cfg.name,CANVAS_W/2,32);
+   ctx.font='bold 13px "Microsoft YaHei"';ctx.textAlign='left';ctx.fillText('⭐ '+score,12,30);ctx.textAlign='right';ctx.fillText('步数:'+totalMoves,CANVAS_W-12,30);
+   // particles
+   for(var i=0;i<particles.length;i++){var p=particles[i];ctx.globalAlpha=Math.max(0,p.life);ctx.fillStyle=p.color;ctx.beginPath();ctx.arc(p.x,p.y,Math.max(0.01,p.size*p.life),0,Math.PI*2);ctx.fill();}ctx.globalAlpha=1;
+   for(var i=0;i<floatingTexts.length;i++){var ft=floatingTexts[i];ctx.globalAlpha=Math.max(0,ft.life);ctx.fillStyle=ft.color;ctx.font='bold 13px "Microsoft YaHei"';ctx.textAlign='center';ctx.fillText(ft.text,ft.x,ft.y);}ctx.globalAlpha=1;
+   // grid
+   ctx.strokeStyle='rgba(255,255,255,0.03)';ctx.lineWidth=1;for(var r=0;r<=ROWS;r++){var y2=BOARD_Y+r*(CELL+GAP)-GAP/2;ctx.beginPath();ctx.moveTo(BOARD_X,y2);ctx.lineTo(BOARD_X+bw2,y2);ctx.stroke();}for(var c=0;c<=COLS;c++){var x3=BOARD_X+c*(CELL+GAP)-GAP/2;ctx.beginPath();ctx.moveTo(x3,BOARD_Y);ctx.lineTo(x3,BOARD_Y+bh2);ctx.stroke();}
+   // game over
+   if(gameState===3){
+     ctx.fillStyle='rgba(0,0,0,0.75)';ctx.fillRect(0,0,CANVAS_W,CANVAS_H);var pw=320,ph=160,px2=(CANVAS_W-pw)/2,py2=(CANVAS_H-ph)/2;drawRoundRect(px2,py2,pw,ph,14,'rgba(20,20,60,0.95)','rgba(255,215,0,0.6)');
+     if(isWin){var wg=ctx.createRadialGradient(CANVAS_W/2,CANVAS_H/2,0,CANVAS_W/2,CANVAS_H/2,CANVAS_W/2);wg.addColorStop(0,'rgba(255,215,0,0.2)');wg.addColorStop(1,'rgba(0,0,0,0)');ctx.fillStyle=wg;ctx.fillRect(0,0,CANVAS_W,CANVAS_H);}
+     ctx.fillStyle=isWin?'#FFD700':'#FF6B6B';ctx.font='bold 24px "Microsoft YaHei"';ctx.textAlign='center';ctx.fillText(isWin?'🎉 战役胜利！敌军溃散！':'💔 城堡沦陷',px2+pw/2,py2+45);ctx.fillStyle='#FFF';ctx.font='14px "Microsoft YaHei"';ctx.fillText('积分:'+score+'  步数:'+totalMoves,px2+pw/2,py2+72);
+     var btnW2=120,bh3=36,bx3=px2+(pw-btnW2)/2,by3=py2+95;
+     if(!isWin){drawRoundRect(bx3-65,by3,btnW2,bh3,18,'#FF6B6B','#FFF');ctx.fillStyle='#FFF';ctx.font='bold 13px "Microsoft YaHei"';ctx.fillText('📜 援军文书',bx3-65+btnW2/2,by3+bh3/2+5);drawRoundRect(bx3+65,by3,btnW2,bh3,18,'#4ECDC4','#FFF');ctx.fillText('🔄 重整旗鼓',bx3+65+btnW2/2,by3+bh3/2+5);canvas._reviveBtn={x:bx3-65,y:by3,w:btnW2,h:bh3};canvas._restartBtn={x:bx3+65,y:by3,w:btnW2,h:bh3};}
+     else{drawRoundRect(bx3,by3,btnW2,bh3,18,'#FFD700','#FFF');ctx.fillStyle='#333';ctx.fillText('▶ 下一关',bx3+btnW2/2,by3+bh3/2+5);canvas._nextBtn={x:bx3,y:by3,w:btnW2,h:bh3};drawRoundRect(bx3,by3-40,btnW2,bh3,18,'rgba(255,255,255,0.15)','#FFF');ctx.fillStyle='#FFF';ctx.fillText('📋 选关',bx3+btnW2/2,by3-40+bh3/2+5);canvas._selectBtn={x:bx3,y:by3-40,w:btnW2,h:bh3};}
+   }
+ }
+
+ // overlays
+ if(phase==='start')drawStartScreen();
+ if(phase==='tutorial')drawTutorial();
+ if(phase==='select')drawLevelSelect();
+}
+
+// ===== 更新 =====
+function update(dt){
+ animTime+=dt;
+ if(phase==='playing'){
+   if(nixiActive){nixiTimer-=dt;if(nixiTimer<=0){nixiActive=false;nixiTimer=0;spawnFloatingText(CANVAS_W/2,BOARD_Y-64,'曙光消散','#FFD700');}}
+   // 暗影风暴关卡：定时触发冲击
+   var cfg=LEVEL_CONFIG[Math.min(level-1,LEVEL_CONFIG.length-1)]||LEVEL_CONFIG[0];
+   if(cfg.storm&&gameState!==3){
+     stormTimer+=dt;
+     if(stormTimer>=cfg.storm){stormTimer=0;pressureAccum=PRESSURE_MAX-1;spawnFloatingText(CANVAS_W/2,BOARD_Y-36,'🌀 风暴来袭！','#FF6B6B');shakeAmount=8;}
+   }
+   if(gameState!==3){
+     pressureAccum+=pressureRate*dt;
+     if(pressureAccum>=PRESSURE_MAX){pressureAccum=0;enemyPressure=0;battleLinePos=Math.max(0,battleLinePos-1);consecutiveAdvances=0;if(battleLinePos<=0)endGame(false);else{spawnFloatingText(CANVAS_W/2,BOARD_Y-32,'🌀 暗影风暴！','#FF6B6B');shakeAmount=6;setTimeout(function(){if(gameState!==3)spawnShadowObstacles();},500);}}
+     enemyPressure=(pressureAccum/PRESSURE_MAX)*100;
+     if(battleLinePos>=LINE_MAX&&gameState!==3)endGame(true);
+   }
+ }
+ for(var i=particles.length-1;i>=0;i--){var p=particles[i];p.x+=p.vx;p.y+=p.vy;p.vy+=0.1;p.life-=p.decay;if(p.life<=0)particles.splice(i,1);}
+ for(var i=floatingTexts.length-1;i>=0;i--){floatingTexts[i].y+=floatingTexts[i].vy;floatingTexts[i].life-=.018;if(floatingTexts[i].life<=0)floatingTexts.splice(i,1);}
+ for(var r=0;r<ROWS;r++){if(!board[r])continue;for(var c=0;c<COLS;c++){var cell=board[r][c];if(!cell)continue;
+   // 闪烁计时器
+   if(cell.flashTimer>0){cell.flashTimer-=dt;if(cell.flashTimer<=0){cell.flashTimer=0;cell.scale=1;cell.opacity=1;}}
+   // 下落动画（带弹跳）
+   if(cell.offsetY&&Math.abs(cell.offsetY)>0.5){
+     cell.offsetY*=0.75;
+     if(cell.dropBounce&&Math.abs(cell.offsetY)<10&&cell.dropBounce>0){
+       cell.offsetY*=-0.3;cell.dropBounce=-1;
+     }
+     if(Math.abs(cell.offsetY)<0.5)cell.offsetY=0;
+   }
+   // scale 弹跳（新方块入场）
+   if(cell.scale&&cell.scale!==1&&!cell.flashTimer){
+     if(cell.scale<1){cell.scale=Math.min(1,cell.scale+dt*8);}
+     else{cell.scale+=(1-cell.scale)*0.25;}
+     if(Math.abs(cell.scale-1)<0.005)cell.scale=1;
+   }
+   if(cell.opacity&&cell.opacity!==1){cell.opacity=Math.min(1,cell.opacity+dt*5);}
+ }}
+ if(shakeAmount>0.1)shakeAmount*=.85;else shakeAmount=0;
+}
+
+function getGridPos(cx,cy){
+  var rect=canvas.getBoundingClientRect();
+  var sx=CANVAS_W/rect.width,sy=CANVAS_H/rect.height;
+  var mx=(cx-rect.left)*sx,my=(cy-rect.top)*sy;
+
+  if(gameState===3){
+    if(canvas._reviveBtn&&isInBtn(canvas._reviveBtn,mx,my)){reviveGame();return null;}
+    if(canvas._restartBtn&&isInBtn(canvas._restartBtn,mx,my)){restartGame();return null;}
+    if(canvas._nextBtn&&isInBtn(canvas._nextBtn,mx,my)){nextLevel();return null;}
+    if(canvas._selectBtn&&isInBtn(canvas._selectBtn,mx,my)){phase='select';return null;}
+  }
+  // 非游玩状态，点击按钮
+  if(phase==='start'){
+    if(isInBtn(startBtn,mx,my)){phase='playing';createBoard();var m=findMatches();if(m.matched.size>0)createBoard();return null;}
+    // 按钮检测顺序与绘制顺序一致：开始、引导、选关
+    var btns=[{y:CANVAS_H/2-40+38,h:40},{y:CANVAS_H/2-40+90,h:40},{y:CANVAS_H/2-40+142,h:40}];
+    var cx2=CANVAS_W/2;
+    for(var i=0;i<btns.length;i++){var by2=btns[i].y;if(mx>=cx2-90&&mx<=cx2+90&&my>=by2&&my<=by2+40){
+      if(i===1){startTutorial();return null;}
+      if(i===2){phase='select';return null;}
+    }}
+  }
+  if(phase==='tutorial'){
+    if(isInBtn(tutoNextBtn,mx,my)){
+      tutorialStep++;
+      if(tutorialStep>=4){phase='playing';createBoard();var m=findMatches();if(m.matched.size>0)createBoard();}return null;
+    }
+  }
+  if(phase==='select'){
+    for(var i=0;i<selectBtns.length;i++){var b=selectBtns[i];if(isInBtn(b,mx,my)){
+      if(b.id==='back'){phase='start';return null;}
+      if(b.level){level=b.level;phase='playing';restartGame();return null;}
+    }}
+  }
+  // 游戏中的棋盘点击
+  if(phase==='playing'){
+    var col=Math.floor((mx-BOARD_X)/(CELL+GAP)),row=Math.floor((my-BOARD_Y)/(CELL+GAP));
+    var cx3=BOARD_X+col*(CELL+GAP),cy3=BOARD_Y+row*(CELL+GAP);
+    if(mx>=cx3&&mx<=cx3+CELL&&my>=cy3&&my<=cy3+CELL&&row>=0&&row<ROWS&&col>=0&&col<COLS)return {row:row,col:col};
+  }
+  return null;
+}
+
+canvas.addEventListener('click',function(e){e.preventDefault();var p=getGridPos(e.clientX,e.clientY);if(p)handleClick(p.row,p.col);});
+canvas.addEventListener('touchstart',function(e){e.preventDefault();if(e.touches.length===1){var p=getGridPos(e.touches[0].clientX,e.touches[0].clientY);if(p)handleClick(p.row,p.col);}});
+
+var lastTime=performance.now();
+function gameLoop(ts){
+  var dt=Math.min((ts-lastTime)/1000,0.1);lastTime=ts;
+  update(dt);render();
+  requestAnimationFrame(gameLoop);
+}
+
+function init(){
+   createBoard(); // 初始化空棋盘用于默认渲染
+   lastTime=performance.now();requestAnimationFrame(gameLoop);
+
+  var panel=document.getElementById('force-panel');
+  var wrapper=document.querySelector('.game-wrapper');
+  function updateUI(){
+    if(window.innerWidth>window.innerHeight){panel.style.display='none';wrapper.style.display='';}
+    else{panel.style.display='flex';wrapper.style.display='none';}
+  }
+  document.getElementById('btn-force-landscape').addEventListener('click',function(){panel.style.display='none';wrapper.style.display='';});
+  updateUI();window.addEventListener('resize',updateUI);
+  window.addEventListener('orientationchange',function(){setTimeout(updateUI,200);setTimeout(updateUI,600);});
+  if(typeof screen!=='undefined'&&screen.orientation&&screen.orientation.lock){screen.orientation.lock('landscape').catch(function(){});}
+}
+init();
+
+console.log('🏰 《逆袭战线》v5.0 — 光明堡 vs 暗渊塔 · 10关战役');
+console.log('  ✅ 战争主题包装（城堡/塔楼/兵种/投石车/法师）');
+console.log('  ✅ 10关难度递增配置（压力/初始战线/魔兵/特殊规则）');
+console.log('  ✅ 关卡名显示 + 选关可见关卡名');
+console.log('  ✅ 第3关禁用火枪 | 第5关魔兵HP+ | 第6关风暴 | 第7关法师加成 | 第8关冲锋+2');
+})();
+</script>
+</body>
+</html>
